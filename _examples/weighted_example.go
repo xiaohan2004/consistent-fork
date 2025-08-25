@@ -41,9 +41,9 @@ func main() {
 
 	// Configure weighted consistent hash
 	cfg := consistent.WeightedConfig{
-		PartitionCount:    71,
-		ReplicationFactor: 10,
-		Load:              1.25,
+		PartitionCount:    271,
+		ReplicationFactor: 50,
+		Load:              1,
 		Hasher:            Hasher{},
 	}
 
@@ -79,6 +79,21 @@ func main() {
 		member := c.LocateKey([]byte(key))
 		weight := weights[member.String()]
 		fmt.Printf("Key: %s -> Server: %s (weight: %d)\n", key, member.String(), weight)
+	}
+
+	// Test key location distribution
+	fmt.Println("\n=== Key Location Distribution Test ===")
+	keyDistribution := make(map[string]int)
+	for i := 0; i < 1000000; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		member := c.LocateKey([]byte(key))
+		keyDistribution[member.String()]++
+	}
+	for member, count := range keyDistribution {
+		weight := weights[member]
+		ratio := float64(count) / float64(weight)
+		fmt.Printf("Member: %s, Key Count: %d, Weight: %d, Ratio: %.2f\n",
+			member, count, weight, ratio)
 	}
 
 	// Test replica finding
@@ -120,4 +135,81 @@ func main() {
 		weight := weights[member.String()]
 		fmt.Printf("Key: %s -> Server: %s (weight: %d)\n", key, member.String(), weight)
 	}
+
+	// Test adding some more servers
+	fmt.Println("\n=== Adding More Servers ===")
+	moreServers := []WeightedServer{
+		{name: "server5", weight: 2},
+		{name: "server6", weight: 3},
+		{name: "server7", weight: 1},
+		{name: "server8", weight: 4},
+		{name: "server9", weight: 2},
+		{name: "server10", weight: 3},
+	}
+	for _, server := range moreServers {
+		c.Add(server)
+	}
+	fmt.Printf("New Total Weight: %d\n", c.GetTotalWeight())
+
+	// Show updated load distribution
+	fmt.Println("\n=== Updated Load Distribution After Adding More Servers ===")
+	loads = c.LoadDistribution()
+	weights = c.WeightDistribution()
+	for member, load := range loads {
+		weight := weights[member]
+		ratio := load / float64(weight)
+		fmt.Printf("Member: %s, Load: %.0f, Weight: %d, Ratio: %.2f\n",
+			member, load, weight, ratio)
+	}
+
+	// Test key location distribution after adding more servers
+	fmt.Println("\n=== Key Location Distribution After Adding More Servers ===")
+	keyDistribution = make(map[string]int)
+	for i := 0; i < 1000000; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		member := c.LocateKey([]byte(key))
+		keyDistribution[member.String()]++
+	}
+	for member, count := range keyDistribution {
+		weight := weights[member]
+		ratio := float64(count) / float64(weight)
+		fmt.Printf("Member: %s, Key Count: %d, Weight: %d, Ratio: %.2f\n",
+			member, count, weight, ratio)
+	}
+
+	// Test removing some servers
+	fmt.Println("\n=== Removing Some Servers ===")
+	serversToRemove := []string{"server2", "server5", "server8"}
+	for _, name := range serversToRemove {
+		c.Remove(name)
+		fmt.Printf("Removed: %s\n", name)
+	}
+	fmt.Printf("New Total Weight: %d\n", c.GetTotalWeight())
+
+	// Show updated load distribution
+	fmt.Println("\n=== Updated Load Distribution After Removing Servers ===")
+	loads = c.LoadDistribution()
+	weights = c.WeightDistribution()
+	for member, load := range loads {
+		weight := weights[member]
+		ratio := load / float64(weight)
+		fmt.Printf("Member: %s, Load: %.0f, Weight: %d, Ratio: %.2f\n",
+			member, load, weight, ratio)
+	}
+
+	// Test key location distribution after removing some servers
+	fmt.Println("\n=== Key Location Distribution After Removing Servers ===")
+	keyDistribution = make(map[string]int)
+	for i := 0; i < 1000000; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		member := c.LocateKey([]byte(key))
+		keyDistribution[member.String()]++
+	}
+	for member, count := range keyDistribution {
+		weight := weights[member]
+		ratio := float64(count) / float64(weight)
+		fmt.Printf("Member: %s, Key Count: %d, Weight: %d, Ratio: %.2f\n",
+			member, count, weight, ratio)
+	}
+	fmt.Println("\n=== End of Example ===")
 }
