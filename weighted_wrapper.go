@@ -137,35 +137,72 @@ func (w *WeightedWrapper) GetWeights() map[string]int {
 
 // GetClosestNWeighted returns the closest N weighted members to a key
 func (w *WeightedWrapper) GetClosestNWeighted(key []byte, count int) ([]WeightedMember, error) {
-	// Get more virtual members than needed to account for duplicates
-	virtualMembers, err := w.Consistent.GetClosestN(key, count*10) // Get more to filter
-	if err != nil {
-		return nil, err
+	if count <= 0 {
+		return []WeightedMember{}, nil
+	}
+
+	// Check if we have enough unique members
+	if count > len(w.weights) {
+		return nil, ErrInsufficientMemberCount
 	}
 
 	var result []WeightedMember
 	seen := make(map[string]bool)
 
-	for _, virtualMember := range virtualMembers {
-		if len(result) >= count {
-			break
+	// Calculate a reasonable multiplier based on the maximum weight
+	maxWeight := 1
+	for _, weight := range w.weights {
+		if weight > maxWeight {
+			maxWeight = weight
+		}
+	}
+
+	// Start with a reasonable estimate: count * maxWeight
+	// This ensures we get enough virtual members to find all unique members
+	requestCount := count * maxWeight
+
+	for {
+		virtualMembers, err := w.Consistent.GetClosestN(key, requestCount)
+		if err != nil {
+			return nil, err
 		}
 
-		if wrapper, ok := virtualMember.(*weightedMemberWrapper); ok {
-			memberName := wrapper.member.String()
-			if !seen[memberName] {
-				seen[memberName] = true
-				result = append(result, wrapper.member)
+		result = result[:0]   // Reset result slice
+		for k := range seen { // Clear seen map
+			delete(seen, k)
+		}
+
+		for _, virtualMember := range virtualMembers {
+			if len(result) >= count {
+				break
+			}
+
+			if wrapper, ok := virtualMember.(*weightedMemberWrapper); ok {
+				memberName := wrapper.member.String()
+				if !seen[memberName] {
+					seen[memberName] = true
+					result = append(result, wrapper.member)
+				}
 			}
 		}
-	}
 
-	if len(result) < count && len(result) > 0 {
-		// If we don't have enough unique members, return what we have
-		return result, nil
-	} else if len(result) == 0 {
-		return nil, ErrInsufficientMemberCount
-	}
+		// If we got enough unique members, we're done
+		if len(result) >= count {
+			return result[:count], nil
+		}
 
-	return result, nil
+		// If we've requested all available virtual members but still don't have enough unique ones
+		if requestCount >= len(w.Consistent.GetMembers()) {
+			if len(result) == 0 {
+				return nil, ErrInsufficientMemberCount
+			}
+			return result, nil
+		}
+
+		// Double the request count and try again
+		requestCount *= 2
+		if requestCount > len(w.Consistent.GetMembers()) {
+			requestCount = len(w.Consistent.GetMembers())
+		}
+	}
 }
