@@ -1,5 +1,8 @@
 // Copyright (c) 2018-2022 Burak Sezer
+// Copyright (c) 2025 xiaohan2004
 // All rights reserved.
+//
+// Modified by xiaohan2004 in 2025 to add weighted nodes support.
 //
 // This code is licensed under the MIT License.
 //
@@ -33,6 +36,12 @@
 //		Load:              1.25,
 //		Hasher:            hasher{},
 //	}
+//
+// Create weighted members:
+//
+//	member1 := &MyWeightedMember{name: "server1", weight: 2}
+//	member2 := &MyWeightedMember{name: "server2", weight: 1}
+//	members := []WeightedMember{member1, member2}
 //
 // Now you can create a new Consistent instance. This function can take a list of the members.
 //
@@ -82,12 +91,13 @@ type Hasher interface {
 	Sum64([]byte) uint64
 }
 
-// Member interface represents a member in consistent hash ring.
+// Member interface represents a weighted member in consistent hash ring.
 type Member interface {
 	String() string
+	Weight() int
 }
 
-// Config represents a structure to control consistent package.
+// Config represents a structure to control weighted consistent package.
 type Config struct {
 	// Hasher is responsible for generating unsigned, 64-bit hash of provided byte slice.
 	Hasher Hasher
@@ -97,15 +107,15 @@ type Config struct {
 	// too many keys.
 	PartitionCount int
 
-	// Members are replicated on consistent hash ring. This number means that a member
-	// how many times replicated on the ring.
+	// Members are replicated on consistent hash ring.
+	// Base replication factor. Members will have replicas = ReplicationFactor * Weight
 	ReplicationFactor int
 
 	// Load is used to calculate average load. See the code, the paper and Google's blog post to learn about it.
 	Load float64
 }
 
-// Consistent holds the information about the members of the consistent hash circle.
+// Consistent holds the information about the weighted members of the consistent hash circle.
 type Consistent struct {
 	mu sync.RWMutex
 
@@ -115,6 +125,8 @@ type Consistent struct {
 	partitionCount uint64
 	loads          map[string]float64
 	members        map[string]*Member
+	weights        map[string]int
+	totalWeight    int
 	partitions     map[int]*Member
 	ring           map[uint64]*Member
 }
@@ -137,6 +149,7 @@ func New(members []Member, config Config) *Consistent {
 	c := &Consistent{
 		config:         config,
 		members:        make(map[string]*Member),
+		weights:        make(map[string]int),
 		partitionCount: uint64(config.PartitionCount),
 		ring:           make(map[uint64]*Member),
 	}
@@ -164,7 +177,7 @@ func (c *Consistent) GetMembers() []Member {
 	return members
 }
 
-// AverageLoad exposes the current average load.
+// AverageLoad exposes the current average load considering weights.
 func (c *Consistent) AverageLoad() float64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -173,11 +186,11 @@ func (c *Consistent) AverageLoad() float64 {
 }
 
 func (c *Consistent) averageLoad() float64 {
-	if len(c.members) == 0 {
+	if len(c.members) == 0 || c.totalWeight == 0 {
 		return 0
 	}
 
-	avgLoad := float64(c.partitionCount/uint64(len(c.members))) * c.config.Load
+	avgLoad := float64(c.partitionCount)/float64(c.totalWeight) * c.config.Load
 	return math.Ceil(avgLoad)
 }
 
@@ -192,8 +205,10 @@ func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]*Mem
 		}
 		i := c.sortedSet[idx]
 		member := *c.ring[i]
+		memberWeight := float64(c.weights[member.String()])
+		expectedLoad := avgLoad * memberWeight
 		load := loads[member.String()]
-		if load+1 <= avgLoad {
+		if load+1 <= expectedLoad {
 			partitions[partID] = &member
 			loads[member.String()]++
 			return
@@ -226,7 +241,15 @@ func (c *Consistent) distributePartitions() {
 }
 
 func (c *Consistent) add(member Member) {
-	for i := 0; i < c.config.ReplicationFactor; i++ {
+	weight := member.Weight()
+	if weight <= 0 {
+		weight = 1 // Ensure minimum weight of 1
+	}
+
+	// Calculate replicas based on weight
+	replicas := c.config.ReplicationFactor * weight
+
+	for i := 0; i < replicas; i++ {
 		key := []byte(fmt.Sprintf("%s%d", member.String(), i))
 		h := c.hasher.Sum64(key)
 		c.ring[h] = &member
@@ -236,11 +259,14 @@ func (c *Consistent) add(member Member) {
 	sort.Slice(c.sortedSet, func(i int, j int) bool {
 		return c.sortedSet[i] < c.sortedSet[j]
 	})
-	// Storing member at this map is useful to find backup members of a partition.
+
+	// Store member and weight information
 	c.members[member.String()] = &member
+	c.weights[member.String()] = weight
+	c.totalWeight += weight
 }
 
-// Add adds a new member to the consistent hash circle.
+// Add adds a new weighted member to the consistent hash circle.
 func (c *Consistent) Add(member Member) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -262,32 +288,41 @@ func (c *Consistent) delSlice(val uint64) {
 	}
 }
 
-// Remove removes a member from the consistent hash circle.
+// Remove removes a weighted member from the consistent hash circle.
 func (c *Consistent) Remove(name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, ok := c.members[name]; !ok {
+	_, ok := c.members[name]
+	if !ok {
 		// There is no member with that name. Quit immediately.
 		return
 	}
 
-	for i := 0; i < c.config.ReplicationFactor; i++ {
+	weight := c.weights[name]
+	replicas := c.config.ReplicationFactor * weight
+
+	for i := 0; i < replicas; i++ {
 		key := []byte(fmt.Sprintf("%s%d", name, i))
 		h := c.hasher.Sum64(key)
 		delete(c.ring, h)
 		c.delSlice(h)
 	}
+
 	delete(c.members, name)
+	c.totalWeight -= c.weights[name]
+	delete(c.weights, name)
+
 	if len(c.members) == 0 {
 		// consistent hash ring is empty now. Reset the partition table.
 		c.partitions = make(map[int]*Member)
+		c.totalWeight = 0
 		return
 	}
 	c.distributePartitions()
 }
 
-// LoadDistribution exposes load distribution of members.
+// LoadDistribution exposes load distribution of weighted members.
 func (c *Consistent) LoadDistribution() map[string]float64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -296,6 +331,19 @@ func (c *Consistent) LoadDistribution() map[string]float64 {
 	res := make(map[string]float64)
 	for member, load := range c.loads {
 		res[member] = load
+	}
+	return res
+}
+
+// WeightDistribution exposes weight distribution of members.
+func (c *Consistent) WeightDistribution() map[string]int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Create a thread-safe copy
+	res := make(map[string]int)
+	for member, weight := range c.weights {
+		res[member] = weight
 	}
 	return res
 }
@@ -324,7 +372,7 @@ func (c *Consistent) getPartitionOwner(partID int) Member {
 	return *member
 }
 
-// LocateKey finds a home for given key
+// LocateKey finds a home for given key considering member weights
 func (c *Consistent) LocateKey(key []byte) Member {
 	partID := c.FindPartitionID(key)
 	return c.GetPartitionOwner(partID)
@@ -379,15 +427,22 @@ func (c *Consistent) getClosestN(partID, count int) ([]Member, error) {
 	return res, nil
 }
 
-// GetClosestN returns the closest N member to a key in the hash ring.
+// GetClosestN returns the closest N weighted member to a key in the hash ring.
 // This may be useful to find members for replication.
 func (c *Consistent) GetClosestN(key []byte, count int) ([]Member, error) {
 	partID := c.FindPartitionID(key)
 	return c.getClosestN(partID, count)
 }
 
-// GetClosestNForPartition returns the closest N member for given partition.
+// GetClosestNForPartition returns the closest N weighted member for given partition.
 // This may be useful to find members for replication.
 func (c *Consistent) GetClosestNForPartition(partID, count int) ([]Member, error) {
 	return c.getClosestN(partID, count)
+}
+
+// GetTotalWeight returns the total weight of all members.
+func (c *Consistent) GetTotalWeight() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.totalWeight
 }
