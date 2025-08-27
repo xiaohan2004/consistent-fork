@@ -13,6 +13,10 @@ func (m Member) String() string {
 	return string(m)
 }
 
+func (m Member) Weight() int {
+	return 1
+}
+
 type hasher struct{}
 
 func (h hasher) Sum64(data []byte) uint64 {

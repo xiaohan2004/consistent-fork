@@ -10,10 +10,17 @@ import (
 // In your distributed system, you probably have a custom data type
 // for your cluster members. Just add a String function to implement
 // consistent.Member interface.
-type myMember string
+type myMember struct{
+	name string
+	weight int
+}
 
 func (m myMember) String() string {
-	return string(m)
+	return m.name
+}
+
+func (m myMember) Weight() int {
+	return m.weight
 }
 
 // consistent package doesn't provide a default hashing function.
@@ -37,10 +44,16 @@ func main() {
 
 	// Add some members to the consistent hash table.
 	// Add function calculates average load and distributes partitions over members
-	node1 := myMember("node1.olricmq.com")
+	node1 := myMember{
+		name: "node1.olricmq.com",
+		weight: 1,
+	}
 	c.Add(node1)
 
-	node2 := myMember("node2.olricmq.com")
+	node2 := myMember{
+		name: "node2.olricmq.com",
+		weight: 2,
+	}
 	c.Add(node2)
 
 	key := []byte("my-key")

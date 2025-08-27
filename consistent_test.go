@@ -45,6 +45,10 @@ func (tm testMember) String() string {
 	return string(tm)
 }
 
+func (tm testMember) Weight() int {
+	return 1
+}
+
 type hasher struct{}
 
 func (hs hasher) Sum64(data []byte) uint64 {
